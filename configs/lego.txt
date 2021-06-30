@@ -17,3 +17,6 @@ precrop_iters = 500
 precrop_frac = 0.5
 
 half_res = True
+
+render_only = True
+ft_path = ./lego_200000.tar
