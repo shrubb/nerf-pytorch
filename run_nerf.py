@@ -18,6 +18,7 @@ from load_deepvoxels import load_dv_data
 from load_blender import load_blender_data
 from load_LINEMOD import load_LINEMOD_data
 
+from pathlib import Path
 
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 np.random.seed(0)
@@ -134,8 +135,16 @@ def render(H, W, K, chunk=1024*32, rays=None, c2w=None, ndc=True,
     return ret_list + [ret_dict]
 
 
-def render_path(render_poses, hwf, K, chunk, render_kwargs, gt_imgs=None, savedir=None, render_factor=0):
+def render_path(
+    render_poses, hwf, K, chunk, render_kwargs, gt_imgs=None, savedir=None, render_factor=0,
+    fixed_viewdir=None):
+    """
+    Render a batch of full images.
 
+    fixed_viewdir:
+        If a 4 x 4 matrix, use this view direction for all frames.
+        If `None`, use actual view direction (camera position).
+    """
     H, W, focal = hwf
 
     if render_factor!=0:
@@ -151,7 +160,13 @@ def render_path(render_poses, hwf, K, chunk, render_kwargs, gt_imgs=None, savedi
     for i, c2w in enumerate(tqdm(render_poses)):
         print(i, time.time() - t)
         t = time.time()
-        rgb, disp, acc, _ = render(H, W, K, chunk=chunk, c2w=c2w[:3,:4], **render_kwargs)
+
+        if fixed_viewdir is not None:
+            rgb, disp, acc, _ = render(
+                H, W, K, chunk=chunk, c2w=fixed_viewdir, c2w_staticcam=c2w[:3,:4], **render_kwargs)
+        else:
+            rgb, disp, acc, _ = render(
+                H, W, K, chunk=chunk, c2w=c2w[:3,:4], **render_kwargs)
         rgbs.append(rgb.cpu().numpy())
         disps.append(disp.cpu().numpy())
         if i==0:
@@ -466,6 +481,12 @@ def config_parser():
                         help='set to 0. for no jitter, 1. for jitter')
     parser.add_argument("--use_viewdirs", action='store_true',
                         help='use full 5D input instead of 3D')
+    parser.add_argument("--fixed_viewdir_in_test",
+                        type=lambda matrix: torch.Tensor(
+                            [list(map(float, row.split(', '))) for row in matrix.split('; ')]),
+                        default=None,
+                        help='In val/test, use this view direction (4 x 4 matrix). '
+                        'If not specified, use actual view direction (camera position).')
     parser.add_argument("--i_embed", type=int, default=0,
                         help='set 0 for default positional encoding, -1 for none')
     parser.add_argument("--multires", type=int, default=10,
@@ -653,6 +674,7 @@ def train():
     # Short circuit if only rendering out from trained model
     if args.render_only:
         print('RENDER ONLY')
+
         with torch.no_grad():
             if args.render_test:
                 # render_test switches to test poses
@@ -665,9 +687,11 @@ def train():
             os.makedirs(testsavedir, exist_ok=True)
             print('test poses shape', render_poses.shape)
 
-            rgbs, _ = render_path(render_poses, hwf, K, args.chunk, render_kwargs_test, gt_imgs=images, savedir=testsavedir, render_factor=args.render_factor)
+            rgbs, _ = render_path(
+                render_poses, hwf, K, args.chunk, render_kwargs_test, gt_imgs=images,
+                savedir=testsavedir, render_factor=args.render_factor,
+                fixed_viewdir=args.fixed_viewdir_in_test)
             print('Done rendering', testsavedir)
-            imageio.mimwrite(os.path.join(testsavedir, 'video.mp4'), to8b(rgbs), fps=30, quality=8)
 
             return
 
