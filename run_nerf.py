@@ -15,7 +15,7 @@ from run_nerf_helpers import *
 
 from load_llff import load_llff_data
 from load_deepvoxels import load_dv_data
-from load_blender import load_blender_data
+from load_blender import load_blender_data, load_blender_poses
 from load_LINEMOD import load_LINEMOD_data
 
 from pathlib import Path
@@ -498,8 +498,12 @@ def config_parser():
 
     parser.add_argument("--render_only", action='store_true',
                         help='do not optimize, reload weights and render out render_poses path')
-    parser.add_argument("--render_test", action='store_true',
-                        help='render the test set instead of render_poses path')
+    parser.add_argument("--render_poses", type=str, default='dataset_path',
+                        help="Which poses to render during evaluation. Can be "
+                             "'test' (dataset's test split), "
+                             "'dataset_path' (other dataset-defined poses, e.g. smooth spherical "
+                             "trajectory in case of 'blender' datasets), or "
+                             "a path to .json file with poses.")
     parser.add_argument("--render_factor", type=int, default=0,
                         help='downsampling factor to speed up rendering, set 4 or 8 for fast preview')
 
@@ -640,8 +644,15 @@ def train():
             [0, 0, 1]
         ])
 
-    if args.render_test:
+    if args.render_poses == 'dataset_path':
+        # Poses already loaded above
+        render_poses = render_poses
+    elif args.render_poses == 'test':
+        # Switch to dataset's test split
         render_poses = np.array(poses[i_test])
+    else:
+        # Switch to custom poses loaded from file
+        render_poses, _ = load_blender_poses(args.render_poses)
 
     # Create log dir and copy the config file
     basedir = args.basedir
@@ -676,14 +687,19 @@ def train():
         print('RENDER ONLY')
 
         with torch.no_grad():
-            if args.render_test:
-                # render_test switches to test poses
+            if args.render_poses == 'test':
                 images = images[i_test]
             else:
-                # Default is smoother render_poses path
                 images = None
 
-            testsavedir = os.path.join(basedir, expname, 'renderonly_{}_{:06d}'.format('test' if args.render_test else 'path', start))
+            if args.render_poses == 'test':
+                poses_name = 'test'
+            elif args.render_poses == 'dataset_path':
+                poses_name = 'path'
+            else:
+                poses_name = Path(args.render_poses).with_suffix('').name
+
+            testsavedir = os.path.join(basedir, expname, 'renderonly_{}_{:06d}'.format(poses_name, start))
             os.makedirs(testsavedir, exist_ok=True)
             print('test poses shape', render_poses.shape)
 

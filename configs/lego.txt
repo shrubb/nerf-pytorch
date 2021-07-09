@@ -19,5 +19,6 @@ precrop_frac = 0.5
 
 half_res = True
 
-render_only = True
 ft_path = ./lego_200000.tar
+render_only = True
+render_poses = data/nerf_synthetic/lego/transforms_test_random_40_elevation120-180.json
