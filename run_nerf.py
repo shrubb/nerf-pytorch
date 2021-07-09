@@ -179,9 +179,9 @@ def render_path(
         """
 
         if savedir is not None:
-            rgb8 = to8b(rgbs[-1])
-            filename = os.path.join(savedir, '{:03d}.png'.format(i))
-            imageio.imwrite(filename, rgb8)
+            image = np.concatenate((rgbs[-1], acc.cpu().numpy()[..., None]), axis=-1)
+            np.clip(image, 0.0, 1.0, out=image)
+            imageio.imwrite(Path(savedir) / f"{i:03}.png", image)
 
 
     rgbs = np.stack(rgbs, 0)
