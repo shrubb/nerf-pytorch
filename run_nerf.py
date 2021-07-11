@@ -239,6 +239,16 @@ def create_nerf(args):
         print('Reloading from', ckpt_path)
         ckpt = torch.load(ckpt_path, map_location=device)
 
+        def remove_prefix(state_dict, prefix):
+            if all(k.startswith(prefix) for k in state_dict):
+                return {k[len(prefix):] : v for k, v in state_dict.items()}
+            else:
+                assert all(not k.startswith(prefix) for k in state_dict)
+                return state_dict
+
+        for k in 'network_fn_state_dict', 'network_fine_state_dict':
+            ckpt[k] = remove_prefix(ckpt[k], 'module.')
+
         start = ckpt['global_step']
         optimizer.load_state_dict(ckpt['optimizer_state_dict'])
 
@@ -485,7 +495,7 @@ def config_parser():
                         type=lambda matrix: torch.Tensor(
                             [list(map(float, row.split(', '))) for row in matrix.split('; ')]),
                         default=None,
-                        help='In val/test, use this view direction (4 x 4 matrix). '
+                        help='In val/test, use this view direction (3 x 4 matrix). '
                         'If not specified, use actual view direction (camera position).')
     parser.add_argument("--i_embed", type=int, default=0,
                         help='set 0 for default positional encoding, -1 for none')
