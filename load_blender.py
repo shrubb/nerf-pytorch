@@ -46,6 +46,34 @@ def load_blender_poses(path):
 
     return camera_poses, [H, W, focal]
 
+def save_blender_poses(path, camera_poses, hwf, names=None):
+    """
+    Write camera transformations to disk in 'nerf-pytorch''s "blender" json format.
+    """
+    H, W, focal = hwf
+    camera_angle_x = 2 * np.arctan(0.5 * W / focal)
+    camera_angle_y = 2 * np.arctan(0.5 * H / focal)
+
+    camera_poses = [
+        np.concatenate((camera[:3, :4], np.float32([[0,0,0,1]]))) for camera in camera_poses]
+
+    output_json = {
+        "image_height": H,
+        "image_width": W,
+        "camera_angle_x": camera_angle_x,
+        "camera_angle_y": camera_angle_y,
+        "frames": [
+            {
+                "file_path": names[idx] if names is not None else f"./{idx:03}.png",
+                "rotation": 0.012566370614359171, # don't know what this is, took it from lego
+                "transform_matrix": camera.tolist()
+            } for idx, camera in enumerate(camera_poses)
+        ]
+    }
+
+    with open(path, 'w') as f:
+        json.dump(output_json, f, indent=4)
+
 def load_blender_data(basedir, half_res=False, testskip=1):
     splits = ['train', 'val', 'test']
     metas = {}

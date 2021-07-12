@@ -15,7 +15,7 @@ from run_nerf_helpers import *
 
 from load_llff import load_llff_data
 from load_deepvoxels import load_dv_data
-from load_blender import load_blender_data, load_blender_poses
+from load_blender import load_blender_data, load_blender_poses, save_blender_poses
 from load_LINEMOD import load_LINEMOD_data
 
 from pathlib import Path
@@ -660,6 +660,9 @@ def train():
     elif args.render_poses == 'test':
         # Switch to dataset's test split
         render_poses = np.array(poses[i_test])
+    elif args.render_poses == 'train':
+        # ...or train split (useful for removing view-dependent effects from the trainset)
+        render_poses = np.array(poses[i_train])
     else:
         # Switch to custom poses loaded from file
         render_poses, _ = load_blender_poses(args.render_poses)
@@ -702,16 +705,19 @@ def train():
             else:
                 images = None
 
-            if args.render_poses == 'test':
-                poses_name = 'test'
+            if args.render_poses in ('test', 'train'):
+                poses_name = args.render_poses
             elif args.render_poses == 'dataset_path':
                 poses_name = 'path'
             else:
                 poses_name = Path(args.render_poses).with_suffix('').name
 
-            testsavedir = os.path.join(basedir, expname, 'renderonly_{}_{:06d}'.format(poses_name, start))
-            os.makedirs(testsavedir, exist_ok=True)
+            testsavedir = Path(basedir) / expname / 'renderonly_{}_{:06d}'.format(poses_name, start)
+            testsavedir.mkdir(parents=True, exist_ok=True)
             print('test poses shape', render_poses.shape)
+
+            # Save camera parameters too
+            save_blender_poses(testsavedir / "cameras.json", render_poses.cpu().numpy(), hwf)
 
             rgbs, _ = render_path(
                 render_poses, hwf, K, args.chunk, render_kwargs_test, gt_imgs=images,
