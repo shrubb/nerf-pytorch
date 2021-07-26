@@ -6,6 +6,7 @@ from tqdm import tqdm
 # install from https://github.com/tatsy/mcubes_pytorch/
 from mcubes_module import mcubes_cpu as marching_cubes
 import run_nerf
+import run_nerf_helpers
 
 import pytorch3d.ops
 import pytorch3d.io
@@ -14,7 +15,7 @@ import pytorch3d.structures
 from pathlib import Path
 
 def compute_nerf_opacity_at_grid(
-    embed_fn, nerf_network, device, bbox_bounds, num_points_per_axis):
+    embed_fn, nerf_network, device, bbox_bounds, num_points_per_axis, hwf=None):
     """
     embed_fn:
         callable
@@ -37,6 +38,10 @@ def compute_nerf_opacity_at_grid(
         *bounds_1d, num_points_per_axis, device=run_nerf.device) for bounds_1d in bbox_bounds]
     meshgrids = torch.meshgrid(grids_1d)
     meshgrids = torch.stack(meshgrids, -1)
+
+    # NDC
+    if hwf is not None:
+        meshgrids = run_nerf_helpers.ndc_rays(*hwf, 1.0, meshgrids)
 
     # NeRF's output that will be later fed to marching cubes -- an occupancy voxel grid
     opacity = torch.empty_like(meshgrids[..., 0])
@@ -66,12 +71,13 @@ def main():
     DESTINATION_FILE = Path("./mesh.obj")
 
     # Bounding box limits
-    bbox = ((-0.7, 0.7), (-1.1818, 1.1818), (-0.333333, 1.05))
+    # bbox = ((-1.5, 2.0), (-1.7, 1.0), (-1.0, 1.0)) # lego
+    bbox = ((-3.5, 3.5), (-2.3, 2.7), (-8.5, -0.05)) # trex
     # How many points in the grid to sample
-    N = 100
+    N = 125
 
     # Tells marching cubes at which opacity value to discretize the voxel grid
-    OPACITY_THRESHOLD = 0.985
+    OPACITY_THRESHOLD = 0.4
     ########### End constants  ###########
 
     if DESTINATION_FILE.exists():
@@ -82,7 +88,12 @@ def main():
     nerf = render_kwargs_test['network_fine']
     embed_fn, input_ch = run_nerf.get_embedder(args.multires, args.i_embed)
 
-    opacity = compute_nerf_opacity_at_grid(embed_fn, nerf, run_nerf.device, bbox, N)
+    if args.dataset_type != 'llff' or args.no_ndc:
+        hwf = None
+    else:
+        _, _, _, _, _, _, _, hwf, _, _, _ = run_nerf.load_dataset(args)
+
+    opacity = compute_nerf_opacity_at_grid(embed_fn, nerf, run_nerf.device, bbox, N, hwf)
 
     # Run marching cubes on the opacity grid that we just received
     verts, faces = marching_cubes(opacity.cpu(), OPACITY_THRESHOLD)
