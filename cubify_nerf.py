@@ -5,8 +5,7 @@ from tqdm import tqdm
 
 # install from https://github.com/tatsy/mcubes_pytorch/
 from mcubes_module import mcubes_cpu as marching_cubes
-import run_nerf
-import run_nerf_helpers
+import run_nerf, nerf
 
 import pytorch3d.ops
 import pytorch3d.io
@@ -22,7 +21,7 @@ def compute_nerf_opacity_at_grid(
         As returned by `run_nerf.get_embedder()`.
     nerf_network:
         callable
-        As in `render_kwargs_test['network_fine']` from `run_nerf.create_nerf()`.
+        As in `render_kwargs_test['network_fine']` from `nerf.create_model()`.
     device:
         str
         A PyTorch device.
@@ -35,13 +34,13 @@ def compute_nerf_opacity_at_grid(
     """
     # Construct the coordinates grid, which is the input to NeRF
     grids_1d = [torch.linspace(
-        *bounds_1d, num_points_per_axis, device=run_nerf.device) for bounds_1d in bbox_bounds]
+        *bounds_1d, num_points_per_axis, device=args.device) for bounds_1d in bbox_bounds]
     meshgrids = torch.meshgrid(grids_1d)
     meshgrids = torch.stack(meshgrids, -1)
 
     # NDC
     if hwf is not None:
-        meshgrids = run_nerf_helpers.ndc_rays(*hwf, 1.0, meshgrids)
+        meshgrids = run_nerf.ndc_rays(*hwf, 1.0, meshgrids)
 
     # NeRF's output that will be later fed to marching cubes -- an occupancy voxel grid
     opacity = torch.empty_like(meshgrids[..., 0])
@@ -84,16 +83,16 @@ def main():
         raise FileExistsError(DESTINATION_FILE)
 
     # Create NeRF model
-    render_kwargs_train, render_kwargs_test, start, grad_vars, optimizer = run_nerf.create_nerf(args)
+    render_kwargs_train, render_kwargs_test, start, grad_vars, optimizer = nerf.create_model(args)
     nerf = render_kwargs_test['network_fine']
-    embed_fn, input_ch = run_nerf.get_embedder(args.multires, args.i_embed)
+    embed_fn, input_ch = nerf.get_embedder(args.multires, args.i_embed)
 
     if args.dataset_type != 'llff' or args.no_ndc:
         hwf = None
     else:
         _, _, _, _, _, _, hwf, _, _, _ = run_nerf.load_dataset(args)
 
-    opacity = compute_nerf_opacity_at_grid(embed_fn, nerf, run_nerf.device, bbox, N, hwf)
+    opacity = compute_nerf_opacity_at_grid(embed_fn, nerf, args.device, bbox, N, hwf)
 
     # Run marching cubes on the opacity grid that we just received
     verts, faces = marching_cubes(opacity.cpu(), OPACITY_THRESHOLD)
