@@ -94,6 +94,9 @@ class NeRF(nn.Module):
             self.output_linear = nn.Linear(W, output_ch)
 
     def predict_alpha(self, input_pts):
+        """
+        `.forward()` stripped of RGB prediction, just the opacity.
+        """
         assert self.use_viewdirs
 
         h = input_pts

@@ -37,8 +37,10 @@ def load_blender_poses(path):
     with open(path, 'r') as f:
         metadata = json.load(f)
 
-    H, W = 800, 800
+    H = metadata.get('image_height', 800)
+    W = metadata.get('image_width', 800)
     camera_angle_x = float(metadata['camera_angle_x'])
+    # camera_angle_y = float(metadata['camera_angle_y'])
     focal = .5 * W / np.tan(.5 * camera_angle_x)
 
     camera_poses = [frame['transform_matrix'] for frame in metadata['frames']]

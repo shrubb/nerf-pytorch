@@ -91,7 +91,7 @@ def main():
     if args.dataset_type != 'llff' or args.no_ndc:
         hwf = None
     else:
-        _, _, _, _, _, _, _, hwf, _, _, _ = run_nerf.load_dataset(args)
+        _, _, _, _, _, _, hwf, _, _, _ = run_nerf.load_dataset(args)
 
     opacity = compute_nerf_opacity_at_grid(embed_fn, nerf, run_nerf.device, bbox, N, hwf)
 

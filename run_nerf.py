@@ -6,7 +6,7 @@ import random
 import time
 import torch
 import torch.nn as nn
-import torch.nn.functional as F
+from torch.utils.tensorboard import SummaryWriter
 from tqdm import tqdm, trange
 
 import matplotlib.pyplot as plt
@@ -249,7 +249,7 @@ def create_nerf(args):
         for k in 'network_fn_state_dict', 'network_fine_state_dict':
             ckpt[k] = remove_prefix(ckpt[k], 'module.')
 
-        start = ckpt['global_step']
+        start = ckpt['global_step'] + 1
         optimizer.load_state_dict(ckpt['optimizer_state_dict'])
 
         # Load model
@@ -296,7 +296,7 @@ def raw2outputs(raw, z_vals, rays_d, raw_noise_std=0, white_bkgd=False, pytest=F
         weights: [num_rays, num_samples]. Weights assigned to each sampled color.
         depth_map: [num_rays]. Estimated distance to object.
     """
-    raw2alpha = lambda raw, dists, act_fn=F.relu: 1.-torch.exp(-act_fn(raw)*dists)
+    raw2alpha = lambda raw, dists, act_fn=torch.relu: 1.-torch.exp(-act_fn(raw)*dists)
 
     dists = z_vals[...,1:] - z_vals[...,:-1]
     dists = torch.cat([dists, torch.Tensor([1e10]).expand(dists[...,:1].shape)], -1)  # [N_rays, N_samples]
@@ -524,7 +524,7 @@ def load_dataset(args):
             [0, 0, 1]
         ])
 
-    return images, poses, bds, render_poses, i_train, i_val, i_test, hwf, near, far, K
+    return images, poses, render_poses, i_train, i_val, i_test, hwf, near, far, K
 
 def config_parser():
 
@@ -654,8 +654,9 @@ def train():
     parser = config_parser()
     args = parser.parse_args()
 
-    images, poses, bds, render_poses, i_train, i_val, i_test, hwf, near, far, K = \
+    images, poses, render_poses, i_train, i_val, i_test, hwf, near, far, K = \
         load_dataset(args)
+    H, W, focal = hwf
 
     if args.render_poses == 'dataset_path':
         # Poses already loaded above
@@ -670,23 +671,21 @@ def train():
         # Switch to custom poses loaded from file
         render_poses, _ = load_blender_poses(args.render_poses)
 
-    # Create log dir and copy the config file
-    basedir = args.basedir
-    expname = args.expname
-    os.makedirs(os.path.join(basedir, expname), exist_ok=True)
-    f = os.path.join(basedir, expname, 'args.txt')
-    with open(f, 'w') as file:
+    # Create log dir, copy the config file, initialize Tensorboard
+    experiment_dir = Path(args.basedir) / args.expname
+    experiment_dir.mkdir(parents=True, exist_ok=True)
+    with open(experiment_dir / "args.txt", 'w') as file:
         for arg in sorted(vars(args)):
             attr = getattr(args, arg)
             file.write('{} = {}\n'.format(arg, attr))
     if args.config is not None:
-        f = os.path.join(basedir, expname, 'config.txt')
-        with open(f, 'w') as file:
-            file.write(open(args.config, 'r').read())
+        with open(experiment_dir / "config.txt", 'w') as file:
+            with open(args.config, 'r') as original_config_file:
+                file.write(original_config_file.read())
+    tensorboard_writer = SummaryWriter(experiment_dir)
 
     # Create nerf model
     render_kwargs_train, render_kwargs_test, start, grad_vars, optimizer = create_nerf(args)
-    global_step = start
 
     bds_dict = {
         'near' : near,
@@ -715,7 +714,7 @@ def train():
             else:
                 poses_name = Path(args.render_poses).with_suffix('').name
 
-            testsavedir = Path(basedir) / expname / 'renderonly_{}_{:06d}'.format(poses_name, start)
+            testsavedir = experiment_dir / 'renderonly_{}_{:06d}'.format(poses_name, start)
             testsavedir.mkdir(parents=True, exist_ok=True)
             print('test poses shape', render_poses.shape)
 
@@ -763,11 +762,7 @@ def train():
     print('TEST views are', i_test)
     print('VAL views are', i_val)
 
-    # Summary writers
-    # writer = SummaryWriter(os.path.join(basedir, 'summaries', expname))
-
-    start = start + 1
-    for i in trange(start, N_iters):
+    for global_step in range(start, N_iters):
         time0 = time.time()
 
         # Sample random ray batch
@@ -794,7 +789,7 @@ def train():
             if N_rand is not None:
                 rays_o, rays_d = get_rays(H, W, K, torch.Tensor(pose))  # (H, W, 3), (H, W, 3)
 
-                if i < args.precrop_iters:
+                if global_step < args.precrop_iters:
                     dH = int(H//2 * args.precrop_frac)
                     dW = int(W//2 * args.precrop_frac)
                     coords = torch.stack(
@@ -802,7 +797,7 @@ def train():
                             torch.linspace(H//2 - dH, H//2 + dH - 1, 2*dH),
                             torch.linspace(W//2 - dW, W//2 + dW - 1, 2*dW)
                         ), -1)
-                    if i == start:
+                    if global_step == start:
                         print(f"[Config] Center cropping of size {2*dH} x {2*dW} is enabled until iter {args.precrop_iters}")
                 else:
                     coords = torch.stack(torch.meshgrid(torch.linspace(0, H-1, H), torch.linspace(0, W-1, W)), -1)  # (H, W, 2)
@@ -817,12 +812,12 @@ def train():
 
         #####  Core optimization loop  #####
         rgb, disp, acc, extras = render(H, W, K, chunk=args.chunk, rays=batch_rays,
-                                                verbose=i < 10, retraw=True,
+                                                verbose=global_step < 10, retraw=True,
                                                 **render_kwargs_train)
 
         optimizer.zero_grad()
         img_loss = img2mse(rgb, target_s)
-        trans = extras['raw'][...,-1]
+        trans = extras['raw'][...,-1] # transparency
         loss = img_loss
         psnr = mse2psnr(img_loss)
 
@@ -848,8 +843,8 @@ def train():
         #####           end            #####
 
         # Rest is logging
-        if i%args.i_weights==0:
-            path = os.path.join(basedir, expname, '{:06d}.tar'.format(i))
+        if global_step % args.i_weights == 0:
+            path = experiment_dir / '{:06d}.tar'.format(global_step)
             torch.save({
                 'global_step': global_step,
                 'network_fn_state_dict': render_kwargs_train['network_fn'].state_dict(),
@@ -858,12 +853,12 @@ def train():
             }, path)
             print('Saved checkpoints at', path)
 
-        if i%args.i_video==0 and i > 0:
+        if global_step % args.i_video == 0 and global_step > 0:
             # Turn on testing mode
             with torch.no_grad():
                 rgbs, disps = render_path(render_poses, hwf, K, args.chunk, render_kwargs_test)
             print('Done, saving', rgbs.shape, disps.shape)
-            moviebase = os.path.join(basedir, expname, '{}_spiral_{:06d}_'.format(expname, i))
+            moviebase = experiment_dir / '{}_spiral_{:06d}_'.format(expname, global_step)
             imageio.mimwrite(moviebase + 'rgb.mp4', to8b(rgbs), fps=30, quality=8)
             imageio.mimwrite(moviebase + 'disp.mp4', to8b(disps / np.max(disps)), fps=30, quality=8)
 
@@ -874,8 +869,8 @@ def train():
             #     render_kwargs_test['c2w_staticcam'] = None
             #     imageio.mimwrite(moviebase + 'rgb_still.mp4', to8b(rgbs_still), fps=30, quality=8)
 
-        if i%args.i_testset==0 and i > 0:
-            testsavedir = os.path.join(basedir, expname, 'testset_{:06d}'.format(i))
+        if global_step % args.i_testset == 0 and global_step > 0:
+            testsavedir = experiment_dir / 'testset_{:06d}'.format(global_step)
             os.makedirs(testsavedir, exist_ok=True)
             print('test poses shape', poses[i_test].shape)
             with torch.no_grad():
@@ -884,51 +879,42 @@ def train():
 
 
 
-        if i%args.i_print==0:
-            tqdm.write(f"[TRAIN] Iter: {i} Loss: {loss.item()}  PSNR: {psnr.item()}")
-        """
-            print(expname, i, psnr.numpy(), loss.numpy(), global_step.numpy())
-            print('iter time {:.05f}'.format(dt))
+        if global_step % args.i_print == 0:
+            tqdm.write(f"[TRAIN] Iter: {global_step} Loss: {loss.item()}  PSNR: {psnr.item()}")
 
-            with tf.contrib.summary.record_summaries_every_n_global_steps(args.i_print):
-                tf.contrib.summary.scalar('loss', loss)
-                tf.contrib.summary.scalar('psnr', psnr)
-                tf.contrib.summary.histogram('tran', trans)
-                if args.N_importance > 0:
-                    tf.contrib.summary.scalar('psnr0', psnr0)
+        tensorboard_writer.add_scalar(f"MSE, train", loss.item(), global_step)
+        tensorboard_writer.add_scalar(f"Step time", dt, global_step)
+        # if args.N_importance > 0:
+        #     tf.contrib.summary.scalar('psnr0', psnr0)
 
+        if global_step % args.i_img == 0:
 
-            if i%args.i_img==0:
+            # Log a rendered validation view to Tensorboard
+            val_image_indices = [i_val[0], i_val[-1]]
+            targets = images[val_image_indices] # N x H x W x C, np.float64, 0..1
+            targets = targets.astype(np.float32)
+            current_val_poses = poses[val_image_indices, :3,:4]
+            with torch.no_grad():
+                # rgbs: N x H x W x C, np.float32, 0..1
+                rgbs, disps = render_path(current_val_poses, hwf, K, args.chunk, render_kwargs_test)
 
-                # Log a rendered validation view to Tensorboard
-                img_i=np.random.choice(i_val)
-                target = images[img_i]
-                pose = poses[img_i, :3,:4]
-                with torch.no_grad():
-                    rgb, disp, acc, extras = render(H, W, focal, chunk=args.chunk, c2w=pose,
-                                                        **render_kwargs_test)
+                mse = img2mse(torch.Tensor(rgbs), torch.Tensor(targets))
+                psnr = mse2psnr(mse)
 
-                psnr = mse2psnr(img2mse(rgb, target))
+            tensorboard_image = np.concatenate((rgbs, targets), axis=2)
+            tensorboard_image = tensorboard_image.reshape(-1, *tensorboard_image.shape[-2:])
+            tensorboard_writer.add_image(
+                'Render, validation', tensorboard_image, global_step,
+                dataformats='HWC')
 
-                with tf.contrib.summary.record_summaries_every_n_global_steps(args.i_img):
+            tensorboard_writer.add_scalar(f"MSE, validation", mse, global_step)
+            tensorboard_writer.add_scalar(f"PSNR, validation", psnr, global_step)
 
-                    tf.contrib.summary.image('rgb', to8b(rgb)[tf.newaxis])
-                    tf.contrib.summary.image('disp', disp[tf.newaxis,...,tf.newaxis])
-                    tf.contrib.summary.image('acc', acc[tf.newaxis,...,tf.newaxis])
-
-                    tf.contrib.summary.scalar('psnr_holdout', psnr)
-                    tf.contrib.summary.image('rgb_holdout', target[tf.newaxis])
-
-
-                if args.N_importance > 0:
-
-                    with tf.contrib.summary.record_summaries_every_n_global_steps(args.i_img):
-                        tf.contrib.summary.image('rgb0', to8b(extras['rgb0'])[tf.newaxis])
-                        tf.contrib.summary.image('disp0', extras['disp0'][tf.newaxis,...,tf.newaxis])
-                        tf.contrib.summary.image('z_std', extras['z_std'][tf.newaxis,...,tf.newaxis])
-        """
-
-        global_step += 1
+            # if args.N_importance > 0:
+            #     with tf.contrib.summary.record_summaries_every_n_global_steps(args.i_img):
+            #         tf.contrib.summary.image('rgb0', to8b(extras['rgb0'])[tf.newaxis])
+            #         tf.contrib.summary.image('disp0', extras['disp0'][tf.newaxis,...,tf.newaxis])
+            #         tf.contrib.summary.image('z_std', extras['z_std'][tf.newaxis,...,tf.newaxis])
 
 
 if __name__=='__main__':
