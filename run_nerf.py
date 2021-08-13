@@ -635,7 +635,7 @@ def train():
             with torch.no_grad():
                 rgbs, disps = render_path(render_poses, hwf, K, args.chunk, render_kwargs_test)
             print('Done, saving', rgbs.shape, disps.shape)
-            moviebase = experiment_dir / '{}_spiral_{:06d}_'.format(expname, global_step)
+            moviebase = experiment_dir / '{}_spiral_{:06d}_'.format(args.expname, global_step)
             imageio.mimwrite(moviebase + 'rgb.mp4', to8b(rgbs), fps=30, quality=8)
             imageio.mimwrite(moviebase + 'disp.mp4', to8b(disps / np.max(disps)), fps=30, quality=8)
 
