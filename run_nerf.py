@@ -1,3 +1,6 @@
+# TODO remove
+DEBUG = False
+
 import os, sys
 import numpy as np
 import imageio
@@ -12,6 +15,7 @@ from tqdm import tqdm, trange
 import matplotlib.pyplot as plt
 
 import nerf
+# import volsdf
 
 from load_llff import load_llff_data
 from load_deepvoxels import load_dv_data
@@ -322,8 +326,10 @@ def config_parser():
                         help='layers in fine network')
     parser.add_argument("--netwidth_fine", type=int, default=256,
                         help='channels per layer in fine network')
-    parser.add_argument("--N_rand", type=int, default=32*32*4,
+    parser.add_argument("--batch_size", type=int, default=32*32*4,
                         help='batch size (number of random rays per gradient step)')
+    parser.add_argument("--num_iterations", type=int, default=200000 + 1,
+                        help='total number of optimization steps')
     parser.add_argument("--lrate", type=float, default=5e-4,
                         help='learning rate')
     parser.add_argument("--lrate_decay", type=int, default=250,
@@ -462,7 +468,12 @@ def train():
     tensorboard_writer = SummaryWriter(experiment_dir)
 
     # Create nerf model
-    render_kwargs_train, render_kwargs_test, start, grad_vars, optimizer = nerf.create_model(args)
+    model_specific_module = {
+        'nerf': nerf,
+        'volsdf': volsdf
+    }[args.model]
+    render_kwargs_train, render_kwargs_test, start, grad_vars, optimizer = \
+        model_specific_module.create_model(args)
 
     bds_dict = {
         'near' : near,
@@ -507,7 +518,7 @@ def train():
             return
 
     # Prepare raybatch tensor if batching random rays
-    N_rand = args.N_rand
+    batch_size = args.batch_size
     use_batching = not args.no_batching
     if use_batching:
         # For random ray batching
@@ -533,23 +544,22 @@ def train():
         rays_rgb = torch.Tensor(rays_rgb).to(args.device)
 
 
-    N_iters = 200000 + 1
     print('Begin')
     print('TRAIN views are', i_train)
     print('TEST views are', i_test)
     print('VAL views are', i_val)
 
-    for global_step in range(start, N_iters):
+    for global_step in range(start, args.num_iterations):
         time0 = time.time()
 
         # Sample random ray batch
         if use_batching:
             # Random over all images
-            batch = rays_rgb[i_batch:i_batch+N_rand] # [B, 2+1, 3*?]
+            batch = rays_rgb[i_batch:i_batch+batch_size] # [B, 2+1, 3*?]
             batch = torch.transpose(batch, 0, 1)
             batch_rays, target_s = batch[:2], batch[2]
 
-            i_batch += N_rand
+            i_batch += batch_size
             if i_batch >= rays_rgb.shape[0]:
                 print("Shuffle data after an epoch!")
                 rand_idx = torch.randperm(rays_rgb.shape[0])
@@ -563,7 +573,7 @@ def train():
             target = torch.Tensor(target).to(args.device)
             pose = poses[img_i, :3,:4]
 
-            if N_rand is not None:
+            if batch_size is not None:
                 rays_o, rays_d = get_rays(H, W, K, torch.Tensor(pose))  # (H, W, 3), (H, W, 3)
 
                 if global_step < args.precrop_iters:
@@ -580,12 +590,12 @@ def train():
                     coords = torch.stack(torch.meshgrid(torch.linspace(0, H-1, H), torch.linspace(0, W-1, W)), -1)  # (H, W, 2)
 
                 coords = torch.reshape(coords, [-1,2])  # (H * W, 2)
-                select_inds = np.random.choice(coords.shape[0], size=[N_rand], replace=False)  # (N_rand,)
-                select_coords = coords[select_inds].long()  # (N_rand, 2)
-                rays_o = rays_o[select_coords[:, 0], select_coords[:, 1]]  # (N_rand, 3)
-                rays_d = rays_d[select_coords[:, 0], select_coords[:, 1]]  # (N_rand, 3)
+                select_inds = np.random.choice(coords.shape[0], size=[batch_size], replace=False)  # (batch_size,)
+                select_coords = coords[select_inds].long()  # (batch_size, 2)
+                rays_o = rays_o[select_coords[:, 0], select_coords[:, 1]]  # (batch_size, 3)
+                rays_d = rays_d[select_coords[:, 0], select_coords[:, 1]]  # (batch_size, 3)
                 batch_rays = torch.stack([rays_o, rays_d], 0)
-                target_s = target[select_coords[:, 0], select_coords[:, 1]]  # (N_rand, 3)
+                target_s = target[select_coords[:, 0], select_coords[:, 1]]  # (batch_size, 3)
 
         #####  Core optimization loop  #####
         rgb, disp, acc, extras = render(H, W, K, chunk=args.chunk, rays=batch_rays,
@@ -620,14 +630,18 @@ def train():
         #####           end            #####
 
         # Rest is logging
-        if global_step % args.i_weights == 0:
-            path = experiment_dir / '{:06d}.tar'.format(global_step)
-            torch.save({
+        if global_step % args.i_weights == 0 and global_step > 0:
+            dict_to_save = {
                 'global_step': global_step,
                 'network_fn_state_dict': render_kwargs_train['network_fn'].state_dict(),
-                'network_fine_state_dict': render_kwargs_train['network_fine'].state_dict(),
                 'optimizer_state_dict': optimizer.state_dict(),
-            }, path)
+            }
+            if 'network_fine' in render_kwargs_train:
+                dict_to_save['network_fine_state_dict'] = \
+                    render_kwargs_train['network_fine'].state_dict()
+
+            path = experiment_dir / '{:06d}.tar'.format(global_step)
+            torch.save(dict_to_save, path)
             print('Saved checkpoints at', path)
 
         if global_step % args.i_video == 0 and global_step > 0:
@@ -635,9 +649,9 @@ def train():
             with torch.no_grad():
                 rgbs, disps = render_path(render_poses, hwf, K, args.chunk, render_kwargs_test)
             print('Done, saving', rgbs.shape, disps.shape)
-            moviebase = experiment_dir / '{}_spiral_{:06d}_'.format(args.expname, global_step)
-            imageio.mimwrite(moviebase + 'rgb.mp4', to8b(rgbs), fps=30, quality=8)
-            imageio.mimwrite(moviebase + 'disp.mp4', to8b(disps / np.max(disps)), fps=30, quality=8)
+            movie_prefix = '{}_spiral_{:06d}'.format(args.expname, global_step)
+            imageio.mimwrite(experiment_dir / f'{movie_prefix}_rgb.mp4', to8b(rgbs), fps=30, quality=8)
+            imageio.mimwrite(experiment_dir / f'{movie_prefix}_disp.mp4', to8b(disps / np.max(disps)), fps=30, quality=8)
 
             # if args.use_viewdirs:
             #     render_kwargs_test['c2w_staticcam'] = render_poses[0][:3,:4]
@@ -666,21 +680,21 @@ def train():
         # if args.N_importance > 0:
         #     tf.contrib.summary.scalar('psnr0', psnr0)
 
-        if global_step % args.i_img == 0:
+        if global_step % args.i_img == 0 and global_step > 0:
 
             # Log a rendered validation view to Tensorboard
             val_image_indices = [i_val[0], i_val[-1]]
             targets = images[val_image_indices] # N x H x W x C, np.float64, 0..1
-            targets = targets.astype(np.float32)
+            targets = torch.Tensor(targets).float()
             current_val_poses = poses[val_image_indices, :3,:4]
             with torch.no_grad():
                 # rgbs: N x H x W x C, np.float32, 0..1
                 rgbs, disps = render_path(current_val_poses, hwf, K, args.chunk, render_kwargs_test)
 
-                mse = img2mse(torch.Tensor(rgbs), torch.Tensor(targets))
+                mse = img2mse(torch.Tensor(rgbs), targets)
                 psnr = mse2psnr(mse)
 
-            tensorboard_image = np.concatenate((rgbs, targets), axis=2)
+            tensorboard_image = np.concatenate((rgbs, targets.cpu()), axis=2)
             tensorboard_image = tensorboard_image.reshape(-1, *tensorboard_image.shape[-2:])
             tensorboard_writer.add_image(
                 'Render, validation', tensorboard_image, global_step,

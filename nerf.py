@@ -6,33 +6,44 @@ import torch.nn as nn
 import torch.nn.functional as F
 import numpy as np
 
-DEBUG = False
+from run_nerf import DEBUG
 
 
 def batchify(fn, chunk):
     """Constructs a version of 'fn' that applies to smaller batches.
+    All `fn`'s inputs have to be K-dimensional and have identical first K-1 sizes.
+    `fn` must return one tensor.
     """
     if chunk is None:
         return fn
-    def ret(inputs):
-        return torch.cat([fn(inputs[i:i+chunk]) for i in range(0, inputs.shape[0], chunk)], 0)
+
+    def ret(*inputs):
+        original_batch_shape = inputs[0].shape[:-1]
+        assert all(x.shape[:-1] == original_batch_shape for x in inputs)
+
+        inputs_flat = [x.reshape(-1, x.shape[-1]) for x in inputs]
+        batch_size = len(inputs_flat[0])
+
+        outputs_flat = [fn(*(x[i:i+chunk] for x in inputs_flat)) for i in range(0, batch_size, chunk)]
+        outputs_flat = torch.cat(outputs_flat, 0)
+        outputs = outputs_flat.reshape(*original_batch_shape, outputs_flat.shape[-1])
+
+        return outputs
+
     return ret
 
 
 def run_network(inputs, viewdirs, fn, embed_fn, embeddirs_fn, netchunk=1024*64):
     """Prepares inputs and applies network 'fn'.
     """
-    inputs_flat = torch.reshape(inputs, [-1, inputs.shape[-1]])
-    embedded = embed_fn(inputs_flat)
+    embedded = embed_fn(inputs)
 
     if viewdirs is not None:
         input_dirs = viewdirs[:,None].expand(inputs.shape)
-        input_dirs_flat = torch.reshape(input_dirs, [-1, input_dirs.shape[-1]])
-        embedded_dirs = embeddirs_fn(input_dirs_flat)
+        embedded_dirs = embeddirs_fn(input_dirs)
         embedded = torch.cat([embedded, embedded_dirs], -1)
 
-    outputs_flat = batchify(fn, netchunk)(embedded)
-    outputs = torch.reshape(outputs_flat, list(inputs.shape[:-1]) + [outputs_flat.shape[-1]])
+    outputs = batchify(fn, netchunk)(embedded)
     return outputs
 
 
@@ -68,16 +79,18 @@ def create_model(args):
     optimizer = torch.optim.Adam(params=grad_vars, lr=args.lrate, betas=(0.9, 0.999))
 
     start = 0
-    basedir = args.basedir
-    expname = args.expname
 
     ##########################
 
     # Load checkpoints
+    basedir = args.basedir
+    expname = args.expname
+
     if args.ft_path is not None and args.ft_path!='None':
         ckpts = [args.ft_path]
     else:
-        ckpts = [os.path.join(basedir, expname, f) for f in sorted(os.listdir(os.path.join(basedir, expname))) if 'tar' in f]
+        experiment_dir = os.path.join(basedir, expname)
+        ckpts = [os.path.join(experiment_dir, f) for f in sorted(os.listdir(experiment_dir)) if 'tar' in f]
 
     print('Found ckpts', ckpts)
     if len(ckpts) > 0 and not args.no_reload:
@@ -131,7 +144,10 @@ def create_model(args):
     return render_kwargs_train, render_kwargs_test, start, grad_vars, optimizer
 
 
-def raw2outputs(raw, z_vals, rays_d, raw_noise_std=0, white_bkgd=False, pytest=False):
+def raw2outputs(
+    raw, z_vals, rays_d,
+    rgb_activation_fn=torch.sigmoid, density_activation_fn=torch.relu,
+    raw_noise_std=0, white_bkgd=False, pytest=False):
     """Transforms model's predictions to semantically meaningful values.
     Args:
         raw: [num_rays, num_samples along ray, 4]. Prediction from model.
@@ -144,27 +160,30 @@ def raw2outputs(raw, z_vals, rays_d, raw_noise_std=0, white_bkgd=False, pytest=F
         weights: [num_rays, num_samples]. Weights assigned to each sampled color.
         depth_map: [num_rays]. Estimated distance to object.
     """
-    raw2alpha = lambda raw, dists, act_fn=torch.relu: 1.-torch.exp(-act_fn(raw)*dists)
-
     dists = z_vals[...,1:] - z_vals[...,:-1]
     dists = torch.cat([dists, torch.Tensor([1e10]).expand(dists[...,:1].shape)], -1)  # [N_rays, N_samples]
 
     dists = dists * torch.norm(rays_d[...,None,:], dim=-1)
 
-    rgb = torch.sigmoid(raw[...,:3])  # [N_rays, N_samples, 3]
+    # Unpack `raw`
+    raw_rgb, raw_alpha = raw[..., :3], raw[..., 3]
+
+    rgb = rgb_activation_fn(raw_rgb)  # [N_rays, N_samples, 3]
+
     noise = 0.
     if raw_noise_std > 0.:
-        noise = torch.randn(raw[...,3].shape) * raw_noise_std
+        noise = torch.randn(raw_alpha.shape) * raw_noise_std
 
         # Overwrite randomly sampled data if pytest
         if pytest:
             np.random.seed(0)
-            noise = np.random.rand(*list(raw[...,3].shape)) * raw_noise_std
+            noise = np.random.rand(*list(raw_alpha.shape)) * raw_noise_std
             noise = torch.Tensor(noise)
+    alpha = \
+        torch.exp(-density_activation_fn(raw_alpha + noise) * dists)  # [N_rays, N_samples]
 
-    alpha = raw2alpha(raw[...,3] + noise, dists)  # [N_rays, N_samples]
     # weights = alpha * tf.math.cumprod(1.-alpha + 1e-10, -1, exclusive=True)
-    weights = alpha * torch.cumprod(torch.cat([torch.ones((alpha.shape[0], 1)), 1.-alpha + 1e-10], -1), -1)[:, :-1]
+    weights = (1.0 - alpha) * torch.cumprod(torch.cat([torch.ones((alpha.shape[0], 1)), alpha + 1e-10], -1), -1)[:, :-1]
     rgb_map = torch.sum(weights[...,None] * rgb, -2)  # [N_rays, 3]
 
     depth_map = torch.sum(weights * z_vals, -1)
@@ -177,7 +196,7 @@ def raw2outputs(raw, z_vals, rays_d, raw_noise_std=0, white_bkgd=False, pytest=F
     return rgb_map, disp_map, acc_map, weights, depth_map
 
 
-def render_rays(ray_batch,
+def render_rays(ray_batch, # of length <= `args.chunk`
                 network_fn,
                 network_query_fn,
                 N_samples,
@@ -192,7 +211,7 @@ def render_rays(ray_batch,
                 pytest=False):
     """Volumetric rendering.
     Args:
-      ray_batch: array of shape [batch_size, ...]. All information necessary
+      ray_batch: array of shape [N, ...]. All information necessary
         for sampling along a ray, including: ray origin, ray direction, min
         dist, max dist, and unit-magnitude viewing direction.
       network_fn: function. Model for predicting RGB and density at each point
@@ -255,7 +274,8 @@ def render_rays(ray_batch,
 
 #     raw = run_network(pts)
     raw = network_query_fn(pts, viewdirs, network_fn)
-    rgb_map, disp_map, acc_map, weights, depth_map = raw2outputs(raw, z_vals, rays_d, raw_noise_std, white_bkgd, pytest=pytest)
+    rgb_map, disp_map, acc_map, weights, depth_map = raw2outputs(
+        raw, z_vals, rays_d, raw_noise_std=raw_noise_std, white_bkgd=white_bkgd, pytest=pytest)
 
     if N_importance > 0:
 
@@ -272,7 +292,8 @@ def render_rays(ray_batch,
 #         raw = run_network(pts, fn=run_fn)
         raw = network_query_fn(pts, viewdirs, run_fn)
 
-        rgb_map, disp_map, acc_map, weights, depth_map = raw2outputs(raw, z_vals, rays_d, raw_noise_std, white_bkgd, pytest=pytest)
+        rgb_map, disp_map, acc_map, weights, depth_map = raw2outputs(
+            raw, z_vals, rays_d, raw_noise_std=raw_noise_std, white_bkgd=white_bkgd, pytest=pytest)
 
     ret = {'rgb_map' : rgb_map, 'disp_map' : disp_map, 'acc_map' : acc_map}
     if retraw:
