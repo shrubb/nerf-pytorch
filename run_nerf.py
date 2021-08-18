@@ -15,7 +15,7 @@ from tqdm import tqdm, trange
 import matplotlib.pyplot as plt
 
 import nerf
-# import volsdf
+import volsdf
 
 from load_llff import load_llff_data
 from load_deepvoxels import load_dv_data
@@ -194,6 +194,9 @@ def render_path(
         else:
             rgb, disp, acc, _ = render(
                 H, W, K, chunk=chunk, c2w=c2w[:3,:4], **render_kwargs)
+
+        rgb.clamp_(0.0, 1.0)
+
         rgbs.append(rgb.cpu().numpy())
         disps.append(disp.cpu().numpy())
         if i==0:
@@ -206,8 +209,8 @@ def render_path(
         """
 
         if savedir is not None:
+            acc.clamp_(0.0, 1.0)
             image = np.concatenate((rgbs[-1], acc.cpu().numpy()[..., None]), axis=-1)
-            np.clip(image, 0.0, 1.0, out=image)
             imageio.imwrite(Path(savedir) / f"{i:03}.png", image)
 
 
@@ -455,6 +458,7 @@ def train():
         render_poses, _ = load_blender_poses(args.render_poses)
 
     # Create log dir, copy the config file, initialize Tensorboard
+    print(f"Experiment name: {args.expname}")
     experiment_dir = Path(args.basedir) / args.expname
     experiment_dir.mkdir(parents=True, exist_ok=True)
     with open(experiment_dir / "args.txt", 'w') as file:
@@ -680,7 +684,7 @@ def train():
         # if args.N_importance > 0:
         #     tf.contrib.summary.scalar('psnr0', psnr0)
 
-        if global_step % args.i_img == 0 and global_step > 0:
+        if global_step % args.i_img == 0:
 
             # Log a rendered validation view to Tensorboard
             val_image_indices = [i_val[0], i_val[-1]]

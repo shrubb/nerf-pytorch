@@ -1,0 +1,31 @@
+expname = lego_volsdf
+basedir = ./logs
+datadir = ./data/nerf_synthetic/lego
+dataset_type = blender
+
+no_batching = False
+batch_size = 960
+
+use_viewdirs = True
+fixed_viewdir_in_test = "0.4429636299610138, 0.31377720832824707, -0.8398374915122986, -3.385493516921997; -0.8965396881103516, 0.1550314873456955, -0.41494810581207275, -1.6727094650268555; 0.0, 0.936754584312439, 0.3499869406223297, 1.4108426570892334"
+white_bkgd = False
+lrate_decay = 100
+num_iterations = 100000
+
+i_img = 1500
+i_weights = 3000
+
+model = volsdf
+multires = 6
+multires_views = 4
+N_samples = 256
+perturb = 0.0
+
+precrop_iters = 500
+precrop_frac = 0.5
+
+half_res = True
+
+# render_only = True
+# ft_path = ./logs/blender_paper_lego_whiteBkgd/050000.tar # ./lego_200000.tar
+# render_poses = data/nerf_synthetic/lego/transforms_test_random_40_elevation120-180.json
