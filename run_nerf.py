@@ -1,18 +1,13 @@
 # TODO remove
 DEBUG = False
 
-import os, sys
+import os
 import numpy as np
 import imageio
-import json
-import random
 import time
 import torch
-import torch.nn as nn
 from torch.utils.tensorboard import SummaryWriter
-from tqdm import tqdm, trange
-
-import matplotlib.pyplot as plt
+from tqdm import tqdm
 
 import nerf
 import volsdf
@@ -553,7 +548,7 @@ def train():
     print('TEST views are', i_test)
     print('VAL views are', i_val)
 
-    for global_step in range(start, args.num_iterations):
+    for global_step in range(start, args.num_iterations + 1):
         time0 = time.time()
 
         # Sample random ray batch
@@ -634,7 +629,7 @@ def train():
         #####           end            #####
 
         # Rest is logging
-        if global_step % args.i_weights == 0 and global_step > 0:
+        if global_step % args.i_weights == 0 and global_step > 0 or global_step == args.num_iterations:
             dict_to_save = {
                 'global_step': global_step,
                 'network_fn_state_dict': render_kwargs_train['network_fn'].state_dict(),
@@ -648,7 +643,7 @@ def train():
             torch.save(dict_to_save, path)
             print('Saved checkpoints at', path)
 
-        if global_step % args.i_video == 0 and global_step > 0:
+        if global_step % args.i_video == 0 and global_step > 0 or global_step == args.num_iterations:
             # Turn on testing mode
             with torch.no_grad():
                 rgbs, disps = render_path(render_poses, hwf, K, args.chunk, render_kwargs_test)
@@ -664,7 +659,7 @@ def train():
             #     render_kwargs_test['c2w_staticcam'] = None
             #     imageio.mimwrite(moviebase + 'rgb_still.mp4', to8b(rgbs_still), fps=30, quality=8)
 
-        if global_step % args.i_testset == 0 and global_step > 0:
+        if global_step % args.i_testset == 0 and global_step > 0 or global_step == args.num_iterations:
             testsavedir = experiment_dir / 'testset_{:06d}'.format(global_step)
             os.makedirs(testsavedir, exist_ok=True)
             print('test poses shape', poses[i_test].shape)
@@ -676,7 +671,7 @@ def train():
 
 
 
-        if global_step % args.i_print == 0:
+        if global_step % args.i_print == 0 or global_step == args.num_iterations:
             tqdm.write(f"[TRAIN] Iter: {global_step} Loss: {loss.item()}  PSNR: {psnr.item()}")
 
         tensorboard_writer.add_scalar(f"MSE, train", loss.item(), global_step)
@@ -684,7 +679,7 @@ def train():
         # if args.N_importance > 0:
         #     tf.contrib.summary.scalar('psnr0', psnr0)
 
-        if global_step % args.i_img == 0:
+        if global_step % args.i_img == 0 or global_step == args.num_iterations:
 
             # Log a rendered validation view to Tensorboard
             val_image_indices = [i_val[0], i_val[-1]]

@@ -94,7 +94,7 @@ class ImplicitNetwork(nn.Module):
 
         with maybe_enable_grad():
             prediction = self.forward(x)
-            sdf, latent_features = prediction[:, :1], prediction[:, 1:]
+            sdf, latent_features = prediction[..., :1], prediction[..., 1:]
 
             if compute_normal:
                 d_output = torch.ones_like(sdf, requires_grad=False, device=sdf.device)
@@ -271,9 +271,9 @@ def render_rays(ray_batch, # of length <= `args.chunk`
         sample.
     """
     N_rays = ray_batch.shape[0]
-    rays_o, rays_d = ray_batch[:,0:3], ray_batch[:,3:6] # [N_rays, 3] each
-    viewdirs = ray_batch[:,-3:] if ray_batch.shape[-1] > 8 else None # [N_rays, 3]
-    bounds = torch.reshape(ray_batch[...,6:8], [-1,1,2])
+    rays_o, rays_d = ray_batch[..., 0:3], ray_batch[..., 3:6] # [N_rays, 3] each
+    viewdirs = ray_batch[..., -3:] if ray_batch.shape[-1] > 8 else None # [N_rays, 3]
+    bounds = torch.reshape(ray_batch[..., 6:8], [-1,1,2])
     near, far = bounds[...,0], bounds[...,1] # [-1,1] # [N_rays, 1] each
 
     # Normalize ray directions. Just to be safe -- not sure if this is really
