@@ -1,4 +1,9 @@
-# Run with `python3 cubify_nerf.py --config configs/lego.txt`
+# Usage example:
+# ```
+# python3 cubify_nerf.py \
+#     --config logs/lego/config.txt \
+#     --ft_path logs/lego/200000.tar
+# ```
 import numpy as np
 import torch
 from tqdm import tqdm
@@ -72,13 +77,14 @@ def main():
     DESTINATION_FILE = Path("./mesh.obj")
 
     # Bounding box limits
-    bbox = ((-1.5, 2.0), (-1.7, 1.0), (-1.0, 1.08)) # lego
+    # bbox = ((-1.5, 2.0), (-1.7, 1.0), (-1.0, 1.08)) # lego
     # bbox = ((-3.5, 3.5), (-2.3, 2.7), (-8.5, -0.05)) # trex
+    bbox = ((-4, 3.5), (-4, 2), (-12.5, -4.5)) # gonzalo
     # How many points in the grid to sample
     N = 275
 
     # Tells marching cubes at which density value to discretize the voxel grid (in case of NeRF)
-    DENSITY_THRESHOLD = 0.4
+    DENSITY_THRESHOLD = 0.98
     ########### End constants  ###########
 
     if DESTINATION_FILE.exists():

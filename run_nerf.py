@@ -147,14 +147,15 @@ def render(
 
     # Render and reshape
     all_ret = batchify_rays(rays, chunk, **render_kwargs)
+    # TODO remove this
     for k in all_ret:
         k_sh = list(sh[:-1]) + list(all_ret[k].shape[1:])
         all_ret[k] = torch.reshape(all_ret[k], k_sh)
 
     k_extract = ['rgb_map', 'disp_map', 'acc_map']
     ret_list = [all_ret[k] for k in k_extract]
-    ret_dict = {k : all_ret[k] for k in all_ret if k not in k_extract}
-    return ret_list + [ret_dict]
+    extras = {k : all_ret[k] for k in all_ret if k not in k_extract}
+    return ret_list + [extras]
 
 
 def render_path(
@@ -549,6 +550,80 @@ def train():
     print('VAL views are', i_val)
 
     for global_step in range(start, args.num_iterations + 1):
+        # First, validate
+        if global_step % args.i_weights == 0 and global_step > 0 or global_step == args.num_iterations:
+            dict_to_save = {
+                'global_step': global_step,
+                'network_fn_state_dict': render_kwargs_train['network_fn'].state_dict(),
+                'optimizer_state_dict': optimizer.state_dict(),
+            }
+            if 'network_fine' in render_kwargs_train:
+                dict_to_save['network_fine_state_dict'] = \
+                    render_kwargs_train['network_fine'].state_dict()
+
+            path = experiment_dir / '{:06d}.tar'.format(global_step)
+            torch.save(dict_to_save, path)
+            print('Saved checkpoints at', path)
+
+        if global_step % args.i_video == 0 and global_step > 0 or global_step == args.num_iterations:
+            # Turn on testing mode
+            with torch.no_grad():
+                rgbs, disps = render_path(render_poses, hwf, K, args.chunk, render_kwargs_test)
+            print('Done, saving', rgbs.shape, disps.shape)
+            movie_prefix = '{}_spiral_{:06d}'.format(args.expname, global_step)
+            imageio.mimwrite(experiment_dir / f'{movie_prefix}_rgb.mp4', to8b(rgbs), fps=30, quality=8)
+            imageio.mimwrite(experiment_dir / f'{movie_prefix}_disp.mp4', to8b(disps / np.max(disps)), fps=30, quality=8)
+
+            del rgbs, disps # hopefully, save a tiny bit of GPU memory...
+
+            # if args.use_viewdirs:
+            #     render_kwargs_test['c2w_staticcam'] = render_poses[0][:3,:4]
+            #     with torch.no_grad():
+            #         rgbs_still, _ = render_path(render_poses, hwf, args.chunk, render_kwargs_test)
+            #     render_kwargs_test['c2w_staticcam'] = None
+            #     imageio.mimwrite(moviebase + 'rgb_still.mp4', to8b(rgbs_still), fps=30, quality=8)
+
+        if global_step % args.i_testset == 0 and global_step > 0 or global_step == args.num_iterations:
+            testsavedir = experiment_dir / 'testset_{:06d}'.format(global_step)
+            os.makedirs(testsavedir, exist_ok=True)
+            print('test poses shape', poses[i_test].shape)
+            with torch.no_grad():
+                render_path(
+                    torch.Tensor(poses[i_test]).to(args.device), hwf, K, args.chunk,
+                    render_kwargs_test, gt_imgs=images[i_test], savedir=testsavedir)
+            print('Saved test set')
+
+        if global_step % args.i_img == 0 or global_step == args.num_iterations:
+            # Log a rendered validation view to Tensorboard
+            val_image_indices = [i_val[0], i_val[-1]]
+            targets = images[val_image_indices] # N x H x W x C, np.float64, 0..1
+            targets = torch.Tensor(targets).float()
+            current_val_poses = poses[val_image_indices, :3,:4]
+            with torch.no_grad():
+                # rgbs: N x H x W x C, np.float32, 0..1
+                rgbs, disps = render_path(current_val_poses, hwf, K, args.chunk, render_kwargs_test)
+
+                mse = img2mse(torch.Tensor(rgbs), targets)
+                psnr = mse2psnr(mse)
+
+            tensorboard_image = np.concatenate((rgbs, targets.cpu()), axis=2)
+            tensorboard_image = tensorboard_image.reshape(-1, *tensorboard_image.shape[-2:])
+            tensorboard_writer.add_image(
+                'Render, validation', tensorboard_image, global_step,
+                dataformats='HWC')
+
+            tensorboard_writer.add_scalar(f"MSE, validation", mse, global_step)
+            tensorboard_writer.add_scalar(f"PSNR, validation", psnr, global_step)
+
+            del rgbs, disps # hopefully, save a tiny bit of GPU memory...
+
+            # if args.N_importance > 0:
+            #     with tf.contrib.summary.record_summaries_every_n_global_steps(args.i_img):
+            #         tf.contrib.summary.image('rgb0', to8b(extras['rgb0'])[tf.newaxis])
+            #         tf.contrib.summary.image('disp0', extras['disp0'][tf.newaxis,...,tf.newaxis])
+            #         tf.contrib.summary.image('z_std', extras['z_std'][tf.newaxis,...,tf.newaxis])
+
+
         time0 = time.time()
 
         # Sample random ray batch
@@ -603,9 +678,13 @@ def train():
 
         optimizer.zero_grad()
         img_loss = img2mse(rgb, target_s)
-        trans = extras['raw'][...,-1] # transparency
         loss = img_loss
         psnr = mse2psnr(img_loss)
+
+        if args.model == 'volsdf':
+            eikonal_loss = ((extras['sdf_normal'] - 1.0) ** 2).mean()
+            eikonal_loss_weight = 0.1 # aka lambda from the paper
+            loss += eikonal_loss_weight * eikonal_loss
 
         if 'rgb0' in extras:
             img_loss0 = img2mse(extras['rgb0'], target_s)
@@ -629,84 +708,16 @@ def train():
         #####           end            #####
 
         # Rest is logging
-        if global_step % args.i_weights == 0 and global_step > 0 or global_step == args.num_iterations:
-            dict_to_save = {
-                'global_step': global_step,
-                'network_fn_state_dict': render_kwargs_train['network_fn'].state_dict(),
-                'optimizer_state_dict': optimizer.state_dict(),
-            }
-            if 'network_fine' in render_kwargs_train:
-                dict_to_save['network_fine_state_dict'] = \
-                    render_kwargs_train['network_fine'].state_dict()
-
-            path = experiment_dir / '{:06d}.tar'.format(global_step)
-            torch.save(dict_to_save, path)
-            print('Saved checkpoints at', path)
-
-        if global_step % args.i_video == 0 and global_step > 0 or global_step == args.num_iterations:
-            # Turn on testing mode
-            with torch.no_grad():
-                rgbs, disps = render_path(render_poses, hwf, K, args.chunk, render_kwargs_test)
-            print('Done, saving', rgbs.shape, disps.shape)
-            movie_prefix = '{}_spiral_{:06d}'.format(args.expname, global_step)
-            imageio.mimwrite(experiment_dir / f'{movie_prefix}_rgb.mp4', to8b(rgbs), fps=30, quality=8)
-            imageio.mimwrite(experiment_dir / f'{movie_prefix}_disp.mp4', to8b(disps / np.max(disps)), fps=30, quality=8)
-
-            # if args.use_viewdirs:
-            #     render_kwargs_test['c2w_staticcam'] = render_poses[0][:3,:4]
-            #     with torch.no_grad():
-            #         rgbs_still, _ = render_path(render_poses, hwf, args.chunk, render_kwargs_test)
-            #     render_kwargs_test['c2w_staticcam'] = None
-            #     imageio.mimwrite(moviebase + 'rgb_still.mp4', to8b(rgbs_still), fps=30, quality=8)
-
-        if global_step % args.i_testset == 0 and global_step > 0 or global_step == args.num_iterations:
-            testsavedir = experiment_dir / 'testset_{:06d}'.format(global_step)
-            os.makedirs(testsavedir, exist_ok=True)
-            print('test poses shape', poses[i_test].shape)
-            with torch.no_grad():
-                render_path(
-                    torch.Tensor(poses[i_test]).to(args.device), hwf, K, args.chunk,
-                    render_kwargs_test, gt_imgs=images[i_test], savedir=testsavedir)
-            print('Saved test set')
-
-
-
         if global_step % args.i_print == 0 or global_step == args.num_iterations:
             tqdm.write(f"[TRAIN] Iter: {global_step} Loss: {loss.item()}  PSNR: {psnr.item()}")
 
         tensorboard_writer.add_scalar(f"MSE, train", loss.item(), global_step)
-        tensorboard_writer.add_scalar(f"Step time", dt, global_step)
         # if args.N_importance > 0:
         #     tf.contrib.summary.scalar('psnr0', psnr0)
-
-        if global_step % args.i_img == 0 or global_step == args.num_iterations:
-
-            # Log a rendered validation view to Tensorboard
-            val_image_indices = [i_val[0], i_val[-1]]
-            targets = images[val_image_indices] # N x H x W x C, np.float64, 0..1
-            targets = torch.Tensor(targets).float()
-            current_val_poses = poses[val_image_indices, :3,:4]
-            with torch.no_grad():
-                # rgbs: N x H x W x C, np.float32, 0..1
-                rgbs, disps = render_path(current_val_poses, hwf, K, args.chunk, render_kwargs_test)
-
-                mse = img2mse(torch.Tensor(rgbs), targets)
-                psnr = mse2psnr(mse)
-
-            tensorboard_image = np.concatenate((rgbs, targets.cpu()), axis=2)
-            tensorboard_image = tensorboard_image.reshape(-1, *tensorboard_image.shape[-2:])
-            tensorboard_writer.add_image(
-                'Render, validation', tensorboard_image, global_step,
-                dataformats='HWC')
-
-            tensorboard_writer.add_scalar(f"MSE, validation", mse, global_step)
-            tensorboard_writer.add_scalar(f"PSNR, validation", psnr, global_step)
-
-            # if args.N_importance > 0:
-            #     with tf.contrib.summary.record_summaries_every_n_global_steps(args.i_img):
-            #         tf.contrib.summary.image('rgb0', to8b(extras['rgb0'])[tf.newaxis])
-            #         tf.contrib.summary.image('disp0', extras['disp0'][tf.newaxis,...,tf.newaxis])
-            #         tf.contrib.summary.image('z_std', extras['z_std'][tf.newaxis,...,tf.newaxis])
+        if args.model == 'volsdf':
+            tensorboard_writer.add_scalar(f"Eikonal loss, train", eikonal_loss, global_step)
+        tensorboard_writer.add_scalar(f"Learning rate", new_lrate, global_step)
+        tensorboard_writer.add_scalar(f"Step time", dt, global_step)
 
 
 if __name__=='__main__':

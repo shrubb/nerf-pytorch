@@ -9,12 +9,12 @@ import numpy as np
 from run_nerf import DEBUG
 
 
-def batchify(fn, chunk):
+def batchify(fn, chunk_size):
     """Constructs a version of 'fn' that applies to smaller batches.
     All `fn`'s inputs have to be K-dimensional and have identical first K-1 sizes.
     `fn` must return one tensor.
     """
-    if chunk is None:
+    if chunk_size is None:
         return fn
 
     def ret(*inputs):
@@ -24,9 +24,15 @@ def batchify(fn, chunk):
         inputs_flat = [x.reshape(-1, x.shape[-1]) for x in inputs]
         batch_size = len(inputs_flat[0])
 
-        outputs_flat = [fn(*(x[i:i+chunk] for x in inputs_flat)) for i in range(0, batch_size, chunk)]
-        outputs_flat = torch.cat(outputs_flat, 0)
-        outputs = outputs_flat.reshape(*original_batch_shape, outputs_flat.shape[-1])
+        # Get output for each chunk
+        outputs_flat = [fn(*(x[i:i+chunk_size] for x in inputs_flat)) for i in range(0, batch_size, chunk_size)]
+        # If `fn` returns one tensor, reduce that to general case
+        if type(outputs_flat[0]) not in (tuple, list):
+            outputs_flat = [[x] for x in outputs_flat]
+        # Concatenate to get one tensor for each output of `fn`
+        outputs_flat = [torch.cat(x, 0) for x in zip(*outputs_flat)]
+        # Reshape them like original inputs
+        outputs = [x.reshape(*original_batch_shape, x.shape[-1]) for x in outputs_flat]
 
         return outputs
 
@@ -305,7 +311,7 @@ def render_rays(ray_batch, # of length <= `args.chunk`
         ret['z_std'] = torch.std(z_samples, dim=-1, unbiased=False)  # [N_rays]
 
     for k in ret:
-        if (torch.isnan(ret[k]).any() or torch.isinf(ret[k]).any()) and DEBUG:
+        if DEBUG and (torch.isnan(ret[k]).any() or torch.isinf(ret[k]).any()):
             print(f"! [Numerical Error] {k} contains nan or inf.")
 
     return ret

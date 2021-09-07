@@ -232,7 +232,7 @@ class VolSDF(nn.Module):
         alpha = self.beta.reciprocal() # hard setting from the paper
         density = alpha * laplace_cdf(-sdf, self.beta)
 
-        return torch.cat((light_field, density), dim=-1)
+        return torch.cat((light_field, density), dim=-1), sdf_normal
 
 
 def render_rays(ray_batch, # of length <= `args.chunk`
@@ -313,7 +313,9 @@ def render_rays(ray_batch, # of length <= `args.chunk`
     viewdirs = viewdirs[:, None].expand(pts.shape)
 
     # Predict light field and density at points sampled on rays
-    rgb_and_density = network_query_fn(pts, viewdirs) # [N_rays, N_samples, 4]
+    rgb_and_density, sdf_normal = network_query_fn(pts, viewdirs)
+    # rgb_and_density: [N_rays, N_samples, 4]
+    # sdf_normal: [N_rays, N_samples]
 
     # Convert predictions to pixel values with numerical integration
     rgb_map, disp_map, acc_map, weights, depth_map = nerf.raw2outputs(
@@ -324,9 +326,10 @@ def render_rays(ray_batch, # of length <= `args.chunk`
     ret = {'rgb_map' : rgb_map, 'disp_map' : disp_map, 'acc_map' : acc_map}
     if retraw:
         ret['raw'] = rgb_and_density
+    ret['sdf_normal'] = sdf_normal
 
     for k in ret:
-        if (torch.isnan(ret[k]).any() or torch.isinf(ret[k]).any()) and DEBUG:
+        if DEBUG and (torch.isnan(ret[k]).any() or torch.isinf(ret[k]).any()):
             print(f"! [Numerical Error] {k} contains nan or inf.")
 
     return ret
