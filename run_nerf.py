@@ -219,9 +219,10 @@ def render_path(
 def load_dataset(args):
     K = None
     if args.dataset_type == 'llff':
-        images, poses, bds, render_poses, i_test = load_llff_data(args.datadir, args.factor,
-                                                                  recenter=True, bd_factor=.75,
-                                                                  spherify=args.spherify)
+        images, poses, bds, render_poses, i_test = load_llff_data(
+            args.datadir, args.factor, recenter=args.recenter, bd_factor=args.rescale_factor,
+            spherify=args.spherify, r=args.r if args.rescale_factor < 0 else None)
+
         hwf = poses[0,:3,-1]
         poses = poses[:,:3,:4]
         print('Loaded llff', images.shape, render_poses.shape, hwf, args.datadir)
@@ -329,6 +330,8 @@ def config_parser():
                         help='batch size (number of random rays per gradient step)')
     parser.add_argument("--num_iterations", type=int, default=200000 + 1,
                         help='total number of optimization steps')
+    parser.add_argument("--optimizer", type=str, choices=['adam', 'radam'], default='adam',
+                        help='Optimizer')
     parser.add_argument("--lrate", type=float, default=5e-4,
                         help='learning rate')
     parser.add_argument("--lrate_decay", type=int, default=250,
@@ -339,6 +342,8 @@ def config_parser():
                         help='number of pts sent through network in parallel, decrease if running out of memory')
     parser.add_argument("--no_batching", action='store_true',
                         help='only take random rays from 1 image at a time')
+    parser.add_argument("--eikonal_loss_weight", type=float, default=0.1,
+                        help="VolSDF only: lambda from equation 17")
     parser.add_argument("--no_reload", action='store_true',
                         help='do not reload weights from saved ckpt')
     parser.add_argument("--ft_path", type=str, default=None,
@@ -354,6 +359,8 @@ def config_parser():
                         help='number of additional fine samples per ray')
     parser.add_argument("--perturb", type=float, default=1.,
                         help='set to 0. for no jitter, 1. for jitter')
+    parser.add_argument("--r", type=float, default=3.0,
+                        help="VolSDF only: 'r', scene boundary parameter from equation (19).")
     parser.add_argument("--use_viewdirs", action='store_true',
                         help='use full 5D input instead of 3D')
     parser.add_argument("--fixed_viewdir_in_test",
@@ -415,6 +422,22 @@ def config_parser():
                         help='set for spherical 360 scenes')
     parser.add_argument("--llffhold", type=int, default=8,
                         help='will take every 1/N images as LLFF test set, paper uses 8')
+    parser.add_argument("--recenter", type=str, default='mean',
+                        choices=['none', 'mean', 'intersection'],
+                        help="Only for --dataset_type=llff.\n"
+                             "If 'none', leave camera poses as is.\n"
+                             "If 'mean', move the scene origin to the average "
+                             "camera position.\n"
+                             "If 'intersection', compute the least squares solution for the "
+                             "intersection point of cameras' principal axes and move the scene "
+                             "origin there.\n"
+                             "See also: '--r'.")
+    parser.add_argument("--rescale_factor", type=float, default=0.75,
+                        help="Only for --dataset_type=llff.\n"
+                             "Rescale the entire scene (i.e. cameras' coordinates) by approx. "
+                             "this value.\n"
+                             "If negative value is given, follow the camera normalization "
+                             "procedure described in VolSDF section B.1, using '--r'.")
 
     # logging/saving options
     parser.add_argument("--i_print",   type=int, default=100,
@@ -472,7 +495,7 @@ def train():
         'nerf': nerf,
         'volsdf': volsdf
     }[args.model]
-    render_kwargs_train, render_kwargs_test, start, grad_vars, optimizer = \
+    render_kwargs_train, render_kwargs_test, start, optimizer = \
         model_specific_module.create_model(args)
 
     bds_dict = {
@@ -509,6 +532,7 @@ def train():
             # Save camera parameters too
             save_blender_poses(testsavedir / "cameras.json", render_poses.cpu().numpy(), hwf)
 
+            render_kwargs_test['network_fn'].eval()
             rgbs, _ = render_path(
                 render_poses, hwf, K, args.chunk, render_kwargs_test, gt_imgs=images,
                 savedir=testsavedir, render_factor=args.render_factor,
@@ -551,6 +575,8 @@ def train():
 
     for global_step in range(start, args.num_iterations + 1):
         # First, validate
+        render_kwargs_test['network_fn'].eval()
+
         if global_step % args.i_weights == 0 and global_step > 0 or global_step == args.num_iterations:
             dict_to_save = {
                 'global_step': global_step,
@@ -593,7 +619,7 @@ def train():
                     render_kwargs_test, gt_imgs=images[i_test], savedir=testsavedir)
             print('Saved test set')
 
-        if global_step % args.i_img == 0 or global_step == args.num_iterations:
+        if global_step % args.i_img == 0 and global_step > 0 or global_step == args.num_iterations:
             # Log a rendered validation view to Tensorboard
             val_image_indices = [i_val[0], i_val[-1]]
             targets = images[val_image_indices] # N x H x W x C, np.float64, 0..1
@@ -623,6 +649,7 @@ def train():
             #         tf.contrib.summary.image('disp0', extras['disp0'][tf.newaxis,...,tf.newaxis])
             #         tf.contrib.summary.image('z_std', extras['z_std'][tf.newaxis,...,tf.newaxis])
 
+        render_kwargs_test['network_fn'].train()
 
         time0 = time.time()
 
@@ -673,18 +700,18 @@ def train():
 
         #####  Core optimization loop  #####
         rgb, disp, acc, extras = render(H, W, K, chunk=args.chunk, rays=batch_rays,
-                                                verbose=global_step < 10, retraw=True,
-                                                **render_kwargs_train)
+                                                retraw=True, **render_kwargs_train)
 
         optimizer.zero_grad()
         img_loss = img2mse(rgb, target_s)
         loss = img_loss
         psnr = mse2psnr(img_loss)
 
+        # Add eikonal loss
         if args.model == 'volsdf':
-            eikonal_loss = ((extras['sdf_normal'] - 1.0) ** 2).mean()
-            eikonal_loss_weight = 0.1 # aka lambda from the paper
-            loss += eikonal_loss_weight * eikonal_loss
+            assert extras['sdf_normal'].shape[-1] == 3
+            eikonal_loss = ((extras['sdf_normal'].norm(2, dim=-1) - 1.0) ** 2).mean()
+            loss += args.eikonal_loss_weight * eikonal_loss
 
         if 'rgb0' in extras:
             img_loss0 = img2mse(extras['rgb0'], target_s)
@@ -711,7 +738,7 @@ def train():
         if global_step % args.i_print == 0 or global_step == args.num_iterations:
             tqdm.write(f"[TRAIN] Iter: {global_step} Loss: {loss.item()}  PSNR: {psnr.item()}")
 
-        tensorboard_writer.add_scalar(f"MSE, train", loss.item(), global_step)
+        tensorboard_writer.add_scalar(f"MSE, train", img_loss, global_step)
         # if args.N_importance > 0:
         #     tf.contrib.summary.scalar('psnr0', psnr0)
         if args.model == 'volsdf':

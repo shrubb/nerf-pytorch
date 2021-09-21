@@ -1,6 +1,7 @@
 import numpy as np
 import torch
 from torch import nn
+import radam # pip install git+https://github.com/LiyuanLucasLiu/RAdam/
 
 from run_nerf import DEBUG
 import nerf
@@ -85,26 +86,35 @@ class ImplicitNetwork(nn.Module):
 
         return x
 
-    def predict_sdf(self, x, compute_normal=False):
+    def predict_sdf(self, coord, compute_normal=False):
+        """
+        coord:
+            `torch.Tensor`, shape = `(..., 3)`
+        compute_normal:
+            `bool`
+            If `True`, also return SDF gradient.
+        """
         if compute_normal:
-            x.requires_grad_(True)
+            coord.requires_grad_(True)
             maybe_enable_grad = torch.enable_grad
         else:
             maybe_enable_grad = contextlib.nullcontext
 
         with maybe_enable_grad():
-            prediction = self.forward(x)
+            prediction = self.forward(coord)
             sdf, latent_features = prediction[..., :1], prediction[..., 1:]
 
             if compute_normal:
-                d_output = torch.ones_like(sdf, requires_grad=False, device=sdf.device)
-                sdf_normal = torch.autograd.grad(
-                    outputs=sdf,
-                    inputs=x,
-                    grad_outputs=d_output,
-                    create_graph=True,
-                    retain_graph=True,
-                    only_inputs=True)[0]
+                # Prevent `coord.grad` from getting overwritten/accumulated
+                old_coord_grad = coord.grad # almost always `None`
+
+                d_output = torch.ones_like(sdf)
+                sdf.backward(
+                    d_output, create_graph=self.training, inputs=[coord])
+                sdf_normal = coord.grad
+
+                coord.grad = old_coord_grad
+
                 return sdf, latent_features, sdf_normal
             else:
                 return sdf, latent_features
@@ -187,6 +197,8 @@ class VolSDF(nn.Module):
         self.embedding_viewdirs_fn, embedding_dims_viewdirs = \
             nerf.get_embedder(args.multires_views, args.i_embed)
 
+        self.r = args.r
+
         # TODO move to args
         feature_vector_size = 256
 
@@ -214,6 +226,7 @@ class VolSDF(nn.Module):
 
     def forward(self, coord, view_direction):
         sdf, latent_features, sdf_normal = self.f.predict_sdf(coord, compute_normal=True)
+        sdf = torch.minimum(sdf, self.r - coord.norm(2, dim=-1, keepdim=True))
 
         light_field = self.L(coord, sdf_normal, view_direction, latent_features)
 
@@ -244,7 +257,7 @@ def render_rays(ray_batch, # of length <= `args.chunk`
                 perturb=0.,
                 white_bkgd=False,
                 raw_noise_std=0.,
-                verbose=False):
+                r=3.0):
     """Volumetric rendering.
     Args:
       ray_batch: array of shape [N, ...]. All information necessary
@@ -252,42 +265,33 @@ def render_rays(ray_batch, # of length <= `args.chunk`
         dist, max dist, and unit-magnitude viewing direction.
       network_fn: not used, only needed for saving weights, TODO remove.
       network_query_fn: instance of `VolSDF` wrapped in `nerf.batchify()`
-      N_samples: int. Number of different times to sample along each ray.
+      N_samples: int. Number samples along each ray.
       retraw: bool. If True, include model's raw, unprocessed predictions.
       lindisp: bool. If True, sample linearly in inverse depth rather than in depth.
       perturb: float, 0 or 1. If non-zero, each ray is sampled at stratified
         random points in time.
       white_bkgd: bool. If True, assume a white background.
-      raw_noise_std: ...
-    Returns:
-      rgb_map: [num_rays, 3]. Estimated RGB color of a ray. Comes from fine model.
+      raw_noise_std: random perturbation for density values (as in NeRF).
+    Returns a dict with these keys:
+      rgb_map: [num_rays, 3]. Estimated RGB color of a ray.
       disp_map: [num_rays]. Disparity map. 1 / depth.
-      acc_map: [num_rays]. Accumulated opacity along each ray. Comes from fine model.
-      raw: [num_rays, num_samples, 4]. Raw predictions from model.
-      rgb0: See rgb_map. Output for coarse model.
-      disp0: See disp_map. Output for coarse model.
-      acc0: See acc_map. Output for coarse model.
-      z_std: [num_rays]. Standard deviation of distances along ray for each
-        sample.
+      acc_map: [num_rays]. Accumulated opacity along each ray.
+      raw: [num_rays, num_samples, 4]. Raw predictions from model (R, G, B, density).
     """
     N_rays = ray_batch.shape[0]
     rays_o, rays_d = ray_batch[..., 0:3], ray_batch[..., 3:6] # [N_rays, 3] each
     viewdirs = ray_batch[..., -3:] if ray_batch.shape[-1] > 8 else None # [N_rays, 3]
-    bounds = torch.reshape(ray_batch[..., 6:8], [-1,1,2])
-    near, far = bounds[...,0], bounds[...,1] # [-1,1] # [N_rays, 1] each
+
+    # see "Modeling the background" in Section B.3
+    M = 2 * r
+    near, far = 0, M
 
     # Normalize ray directions. Just to be safe -- not sure if this is really
     # needed (e.g. this wasn't done in 'nerf-pytorch')
     rays_d_norm = rays_d.norm(dim=-1, keepdim=True).clamp(min=1e-4)
-    near *= rays_d_norm
-    far *= rays_d_norm
     rays_d = rays_d / rays_d_norm
 
-    # TODO implement proper sampling
-    # Get sampling Τ (Algorithm 1)
-    # r = 3.0 # TODO move to args
-    # M = 2 * r # TODO move to args
-    # t_vals = torch.linspace(0., M, steps=N_samples)
+    # TODO implement proper sampling Τ (see Algorithm 1)
 
     t_vals = torch.linspace(0., 1., steps=N_samples)
     if not lindisp:
@@ -313,9 +317,13 @@ def render_rays(ray_batch, # of length <= `args.chunk`
     viewdirs = viewdirs[:, None].expand(pts.shape)
 
     # Predict light field and density at points sampled on rays
-    rgb_and_density, sdf_normal = network_query_fn(pts, viewdirs)
+    rgb_and_density, _ = network_query_fn(pts, viewdirs)
+
+    points_for_eikonal_loss = torch.empty((N_rays, 3), device=pts.device).uniform_(-r/2, r/2)
+    _, _, sdf_normal_for_eikonal_loss = network_fn.f.predict_sdf(
+        points_for_eikonal_loss, compute_normal=True)
     # rgb_and_density: [N_rays, N_samples, 4]
-    # sdf_normal: [N_rays, N_samples]
+    # sdf_normal: [N_rays, N_samples, 3]
 
     # Convert predictions to pixel values with numerical integration
     rgb_map, disp_map, acc_map, weights, depth_map = nerf.raw2outputs(
@@ -326,7 +334,7 @@ def render_rays(ray_batch, # of length <= `args.chunk`
     ret = {'rgb_map' : rgb_map, 'disp_map' : disp_map, 'acc_map' : acc_map}
     if retraw:
         ret['raw'] = rgb_and_density
-    ret['sdf_normal'] = sdf_normal
+    ret['sdf_normal'] = sdf_normal_for_eikonal_loss
 
     for k in ret:
         if DEBUG and (torch.isnan(ret[k]).any() or torch.isinf(ret[k]).any()):
@@ -339,8 +347,11 @@ def create_model(args):
     model = VolSDF(args)
 
     # Create optimizer
-    grad_vars = list(model.parameters())
-    optimizer = torch.optim.Adam(params=grad_vars, lr=args.lrate, betas=(0.9, 0.999))
+    grad_vars = model.parameters()
+    if args.optimizer == 'adam':
+        optimizer = torch.optim.Adam(params=grad_vars, lr=args.lrate, betas=(0.9, 0.999))
+    elif args.optimizer == 'radam':
+        optimizer = radam.RAdam(params=grad_vars, lr=args.lrate)
 
     start = 0
 
@@ -387,6 +398,7 @@ def create_model(args):
         'white_bkgd' : args.white_bkgd,
         'raw_noise_std' : args.raw_noise_std,
         'render_rays_fn': render_rays,
+        'r': args.r,
     }
 
     # NDC only good for LLFF-style forward facing data
@@ -398,4 +410,4 @@ def create_model(args):
     render_kwargs_test = {k : render_kwargs_train[k] for k in render_kwargs_train}
     # render_kwargs_test['raw_noise_std'] = 0.
 
-    return render_kwargs_train, render_kwargs_test, start, grad_vars, optimizer
+    return render_kwargs_train, render_kwargs_test, start, optimizer

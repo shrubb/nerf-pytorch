@@ -1,12 +1,14 @@
-expname = gonzalo_notNDC_eikonal
+expname = gonzalo_masks_r_eikonal0
 basedir = ./logs
 datadir = ./data/Gonzalo/VID_20210527_162457
 dataset_type = llff
-factor = 4
+factor = 3
 no_ndc = True
+recenter = intersection
+rescale_factor = -1 # i.e. do camera normalization as in VolSDF
 
 no_batching = False
-batch_size = 944
+batch_size = 928
 chunk = 1024
 
 use_viewdirs = True
@@ -18,8 +20,6 @@ i_img = 1500
 i_weights = 3000
 
 model = volsdf
-# multires = 6
-# multires_views = 4
 N_samples = 256
 perturb = 0.0
 

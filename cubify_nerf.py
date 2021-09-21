@@ -4,6 +4,7 @@
 #     --config logs/lego/config.txt \
 #     --ft_path logs/lego/200000.tar
 # ```
+# Make sure that it prints something like "Loading from ckpt ..."
 import numpy as np
 import torch
 from tqdm import tqdm
@@ -68,7 +69,6 @@ def main():
 
     parser = run_nerf.config_parser()
     args = parser.parse_args()
-    assert args.ft_path is not None
 
     ########### Constants for configs/lego.txt ###########
     # TODO: move them to config
@@ -77,11 +77,13 @@ def main():
     DESTINATION_FILE = Path("./mesh.obj")
 
     # Bounding box limits
-    # bbox = ((-1.5, 2.0), (-1.7, 1.0), (-1.0, 1.08)) # lego
+    bbox = ((-1.5, 2.0), (-1.7, 1.0), (-1.0, 1.08)) # lego
     # bbox = ((-3.5, 3.5), (-2.3, 2.7), (-8.5, -0.05)) # trex
-    bbox = ((-4, 3.5), (-4, 2), (-12.5, -4.5)) # gonzalo
+    # bbox = ((-4, 3.5), (-4, 2), (-12.5, -4.5)) # gonzalo
+    # bbox = ((-0.8, 0.8), (-1.2, 1.2), (-0.4, 0.5)) # gonzalo recentered3
+    # bbox = ((-2, 2), (-2, 2), (-2, 2))
     # How many points in the grid to sample
-    N = 275
+    N = 200
 
     # Tells marching cubes at which density value to discretize the voxel grid (in case of NeRF)
     DENSITY_THRESHOLD = 0.98
@@ -96,7 +98,7 @@ def main():
         _, _, _, _, _, _, hwf, _, _, _ = run_nerf.load_dataset(args)
 
     if args.model == 'nerf':
-        render_kwargs_train, render_kwargs_test, start, grad_vars, optimizer = \
+        render_kwargs_train, render_kwargs_test, start, optimizer = \
             nerf.create_model(args)
 
         model = render_kwargs_test['network_fine']
@@ -112,7 +114,7 @@ def main():
         marching_cubes_threshold = DENSITY_THRESHOLD
 
     elif args.model == 'volsdf':
-        render_kwargs_train, render_kwargs_test, start, grad_vars, optimizer = \
+        render_kwargs_train, render_kwargs_test, start, optimizer = \
             volsdf.create_model(args)
 
         model = render_kwargs_test['network_fn']

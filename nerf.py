@@ -33,6 +33,9 @@ def batchify(fn, chunk_size):
         outputs_flat = [torch.cat(x, 0) for x in zip(*outputs_flat)]
         # Reshape them like original inputs
         outputs = [x.reshape(*original_batch_shape, x.shape[-1]) for x in outputs_flat]
+        # If there was one tensor, don't return it in a list
+        if len(outputs) == 1:
+            outputs = outputs[0]
 
         return outputs
 
@@ -147,7 +150,7 @@ def create_model(args):
     render_kwargs_test['perturb'] = False
     render_kwargs_test['raw_noise_std'] = 0.
 
-    return render_kwargs_train, render_kwargs_test, start, grad_vars, optimizer
+    return render_kwargs_train, render_kwargs_test, start, optimizer
 
 
 def raw2outputs(
@@ -213,7 +216,6 @@ def render_rays(ray_batch, # of length <= `args.chunk`
                 network_fine=None,
                 white_bkgd=False,
                 raw_noise_std=0.,
-                verbose=False,
                 pytest=False):
     """Volumetric rendering.
     Args:
@@ -233,7 +235,6 @@ def render_rays(ray_batch, # of length <= `args.chunk`
       network_fine: "fine" network with same spec as network_fn.
       white_bkgd: bool. If True, assume a white background.
       raw_noise_std: ...
-      verbose: bool. If True, print more debugging info.
     Returns:
       rgb_map: [num_rays, 3]. Estimated RGB color of a ray. Comes from fine model.
       disp_map: [num_rays]. Disparity map. 1 / depth.
