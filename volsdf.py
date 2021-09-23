@@ -101,7 +101,7 @@ class ImplicitNetwork(nn.Module):
             maybe_enable_grad = contextlib.nullcontext
 
         with maybe_enable_grad():
-            prediction = self.forward(coord)
+            prediction = self(coord)
             sdf, latent_features = prediction[..., :1], prediction[..., 1:]
 
             if compute_normal:
@@ -226,7 +226,7 @@ class VolSDF(nn.Module):
 
     def forward(self, coord, view_direction):
         sdf, latent_features, sdf_normal = self.f.predict_sdf(coord, compute_normal=True)
-        sdf = torch.minimum(sdf, self.r - coord.norm(2, dim=-1, keepdim=True))
+        sdf = torch.minimum(sdf, self.r - coord.norm(2, dim=-1, keepdim=True)) # equation 19
 
         light_field = self.L(coord, sdf_normal, view_direction, latent_features)
 

@@ -22,7 +22,10 @@ from pathlib import Path
 np.random.seed(0)
 
 # Misc
-img2mse = lambda x, y : torch.mean((x - y) ** 2)
+loss_functions = {
+	'MSE': lambda x, y : torch.mean((x - y) ** 2), # legacy from NeRF
+	'L1': torch.nn.functional.l1_loss,
+}
 mse2psnr = lambda x : -10. * torch.log(x) / torch.log(torch.Tensor([10.]))
 to8b = lambda x : (255*np.clip(x,0,1)).astype(np.uint8)
 
@@ -330,6 +333,8 @@ def config_parser():
                         help='batch size (number of random rays per gradient step)')
     parser.add_argument("--num_iterations", type=int, default=200000 + 1,
                         help='total number of optimization steps')
+    parser.add_argument("--loss", type=str, choices=['MSE', 'L1'], default='MSE',
+                        help="Type of loss function")
     parser.add_argument("--optimizer", type=str, choices=['adam', 'radam'], default='adam',
                         help='Optimizer')
     parser.add_argument("--lrate", type=float, default=5e-4,
@@ -567,6 +572,7 @@ def train():
     if use_batching:
         rays_rgb = torch.Tensor(rays_rgb).to(args.device)
 
+    loss_function = loss_functions[args.loss]
 
     print('Begin')
     print('TRAIN views are', i_train)
@@ -629,7 +635,7 @@ def train():
                 # rgbs: N x H x W x C, np.float32, 0..1
                 rgbs, disps = render_path(current_val_poses, hwf, K, args.chunk, render_kwargs_test)
 
-                mse = img2mse(torch.Tensor(rgbs), targets)
+                mse = loss_functions['MSE'](torch.Tensor(rgbs), targets)
                 psnr = mse2psnr(mse)
 
             tensorboard_image = np.concatenate((rgbs, targets.cpu()), axis=2)
@@ -703,9 +709,9 @@ def train():
                                                 retraw=True, **render_kwargs_train)
 
         optimizer.zero_grad()
-        img_loss = img2mse(rgb, target_s)
+        img_loss = loss_function(rgb, target_s)
         loss = img_loss
-        psnr = mse2psnr(img_loss)
+        psnr = mse2psnr(img_loss) if args.loss == 'MSE' else np.nan
 
         # Add eikonal loss
         if args.model == 'volsdf':
@@ -714,9 +720,9 @@ def train():
             loss += args.eikonal_loss_weight * eikonal_loss
 
         if 'rgb0' in extras:
-            img_loss0 = img2mse(extras['rgb0'], target_s)
+            img_loss0 = loss_function(extras['rgb0'], target_s)
             loss = loss + img_loss0
-            psnr0 = mse2psnr(img_loss0)
+            psnr0 = mse2psnr(img_loss0) if args.loss == 'MSE' else np.nan
 
         loss.backward()
         optimizer.step()
@@ -736,9 +742,9 @@ def train():
 
         # Rest is logging
         if global_step % args.i_print == 0 or global_step == args.num_iterations:
-            tqdm.write(f"[TRAIN] Iter: {global_step} Loss: {loss.item()}  PSNR: {psnr.item()}")
+            tqdm.write(f"[TRAIN] Iter: {global_step} Loss: {loss}  PSNR: {psnr}")
 
-        tensorboard_writer.add_scalar(f"MSE, train", img_loss, global_step)
+        tensorboard_writer.add_scalar(f"{args.loss}, train", img_loss, global_step)
         # if args.N_importance > 0:
         #     tf.contrib.summary.scalar('psnr0', psnr0)
         if args.model == 'volsdf':
