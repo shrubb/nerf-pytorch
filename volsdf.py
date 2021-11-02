@@ -321,9 +321,9 @@ def render_rays(ray_batch, # of length <= `args.chunk`
 
     # Generate points uniformly in a ball
     # https://stats.stackexchange.com/a/30622
-	points_for_eikonal_loss = torch.randn((N_rays, 3), device=pts.device)
-	points_for_eikonal_loss /= points_for_eikonal_loss.norm(2, dim=-1, keepdim=True).clip(1e-5)
-	points_for_eikonal_loss *= r * (torch.rand(N_rays, 1) ** (1/3)
+    points_for_eikonal_loss = torch.randn((N_rays, 3), device=pts.device)
+    points_for_eikonal_loss /= points_for_eikonal_loss.norm(2, dim=-1, keepdim=True).clip(1e-5)
+    points_for_eikonal_loss *= r * (torch.rand(N_rays, 1) ** (1/3))
     _, _, sdf_normal_for_eikonal_loss = network_fn.f.predict_sdf(
         points_for_eikonal_loss, compute_normal=True)
     # rgb_and_density: [N_rays, N_samples, 4]
