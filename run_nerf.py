@@ -80,16 +80,18 @@ def ndc_rays(H, W, focal, near, rays_o, rays_d=None):
     o0 = -1./(W/(2.*focal)) * rays_o[...,0] / rays_o[...,2]
     o1 = -1./(H/(2.*focal)) * rays_o[...,1] / rays_o[...,2]
     o2 = 1. + 2. * near / rays_o[...,2]
-    rays_o = torch.stack([o0,o1,o2], -1)
 
-    if rays_d is None:
-        return rays_o
-    else:
+    if rays_d is not None:
         d0 = -1./(W/(2.*focal)) * (rays_d[...,0]/rays_d[...,2] - rays_o[...,0]/rays_o[...,2])
         d1 = -1./(H/(2.*focal)) * (rays_d[...,1]/rays_d[...,2] - rays_o[...,1]/rays_o[...,2])
         d2 = -2. * near / rays_o[...,2]
         rays_d = torch.stack([d0,d1,d2], -1)
 
+    rays_o = torch.stack([o0,o1,o2], -1)
+
+    if rays_d is None:
+        return rays_o
+    else:
         return rays_o, rays_d
 
 
@@ -333,6 +335,8 @@ def config_parser():
                         help='batch size (number of random rays per gradient step)')
     parser.add_argument("--num_iterations", type=int, default=200000 + 1,
                         help='total number of optimization steps')
+    parser.add_argument("--start_iter", type=int, default=0,
+                        help="Iteration number to start from (affects learning rate and TensorBoard)")
     parser.add_argument("--loss", type=str, choices=['MSE', 'L1'], default='MSE',
                         help="Type of loss function")
     parser.add_argument("--optimizer", type=str, choices=['adam', 'radam'], default='adam',

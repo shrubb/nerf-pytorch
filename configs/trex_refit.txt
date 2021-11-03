@@ -1,4 +1,4 @@
-expname = horns
+expname = horns_refit_from_trex
 basedir = ./logs
 datadir = ./data/nerf_llff_data/horns
 dataset_type = llff
@@ -13,5 +13,12 @@ N_importance = 64
 use_viewdirs = True
 raw_noise_std = 1e0
 
+optimizer = radam
+lrate = 1e-4
+lrate_decay = 100000
+
+i_img = 2500
+
+ft_path = logs/trex_pretrained/100000.tar
 # render_only = True
 render_poses = dataset_path

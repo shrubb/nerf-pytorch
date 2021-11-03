@@ -357,7 +357,7 @@ def create_model(args):
     elif args.optimizer == 'radam':
         optimizer = radam.RAdam(params=grad_vars, lr=args.lrate)
 
-    start = 0
+    start = args.start_iter
 
     # Load checkpoints
     basedir = args.basedir

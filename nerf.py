@@ -87,7 +87,7 @@ def create_model(args):
     # Create optimizer
     optimizer = torch.optim.Adam(params=grad_vars, lr=args.lrate, betas=(0.9, 0.999))
 
-    start = 0
+    start = args.start_iter
 
     ##########################
 
